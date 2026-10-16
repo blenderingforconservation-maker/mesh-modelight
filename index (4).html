@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#010604" />
+<title>Mesh decimate</title>
+<!--
+  Mesh decimate: herramienta interna de optimización de GLB.
+  Este documento HTML no contiene código copiado del sitio de terceros
+  utilizado como referencia funcional. La operación depende de bibliotecas
+  abiertas cargadas desde CDN (no empaquetadas con este archivo):
+  * glTF Transform 4.5.0 - Don McCurdy y colaboradores - licencia MIT
+    https://github.com/donmccurdy/glTF-Transform/blob/main/LICENSE.md
+  * meshoptimizer 0.25.0 - Arseny Kapoulkine y colaboradores - licencia MIT
+    https://github.com/zeux/meshoptimizer/blob/master/LICENSE.md
+  * model-viewer 4.1.0 - Google LLC y colaboradores - licencia Apache 2.0
+    https://github.com/google/model-viewer/blob/master/LICENSE
+  Las bibliotecas mantienen sus respectivos derechos y licencias.
+  No se declara afiliación con sus autores ni con herramientas de terceros.
+-->
+<script>
+  self.ModelViewerElement = self.ModelViewerElement || {};
+  self.ModelViewerElement.meshoptDecoderLocation =
+    'https://cdn.jsdelivr.net/npm/meshoptimizer@0.25.0/meshopt_decoder.js';
+</script>
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.1.0/model-viewer.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "@gltf-transform/core": "https://esm.sh/@gltf-transform/core@4.5.0",
+    "@gltf-transform/extensions": "https://esm.sh/@gltf-transform/extensions@4.5.0?external=@gltf-transform/core",
+    "@gltf-transform/functions": "https://esm.sh/@gltf-transform/functions@4.5.0?external=@gltf-transform/core,@gltf-transform/extensions",
+    "meshoptimizer": "https://esm.sh/meshoptimizer@0.25.0"
+  }
+}
+</script>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #010604;
+  --surface: rgba(5, 17, 12, .94);
+  --raised: #0a1d14;
+  --line: rgba(71, 255, 148, .24);
+  --text: #eafff2;
+  --muted: #a3bbac;
+  --accent: #55ffa0;
+  --strong: #a3ffd0;
+  --warn: #ffcf81;
+  --bad: #ff999c;
+  --shadow: 0 18px 50px rgba(0, 0, 0, .38), 0 0 24px rgba(15, 235, 105, .035);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
+  isolation: isolate;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  line-height: 1.45;
+  color: var(--text);
+  background:
+    radial-gradient(ellipse at 50% 105%, rgba(0, 135, 53, .12), transparent 58%),
+    linear-gradient(180deg, #010403 0%, #020805 58%, #010604 100%);
+}
+/* Cuadrícula holográfica: acentuada en la zona inferior y desvanecida hacia arriba. */
+body::before {
+  content: "";
+  position: fixed;
+  z-index: 0;
+  pointer-events: none;
+  left: -25vw;
+  bottom: -24vh;
+  width: 150vw;
+  height: 105vh;
+  background-image:
+    linear-gradient(90deg, rgba(34, 255, 112, .38) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(34, 255, 112, .32) 1px, transparent 1px);
+  background-size: 62px 62px;
+  transform-origin: 50% 100%;
+  transform: perspective(630px) rotateX(53deg) scale(1.14);
+  -webkit-mask-image: linear-gradient(to top, black 4%, rgba(0,0,0,.74) 37%, transparent 90%);
+  mask-image: linear-gradient(to top, black 4%, rgba(0,0,0,.74) 37%, transparent 90%);
+  opacity: .8;
+}
+body::after {
+  content: "";
+  position: fixed;
+  z-index: 0;
+  pointer-events: none;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 115%, rgba(32, 255, 116, .10), transparent 50%);
+}
+header, main, footer { position: relative; z-index: 1; }
+header { max-width: 1640px; margin: auto; padding: 27px 25px 9px; }
+h1 {
+  font-size: clamp(1.75rem, 3vw, 2.4rem);
+  line-height: 1.15;
+  font-weight: 750;
+  letter-spacing: -.025em;
+  margin: 0;
+  color: var(--text);
+  text-shadow: 0 0 22px rgba(50, 255, 120, .14);
+}
+a { color: var(--accent); }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, .drop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.shell {
+  max-width: 1640px;
+  margin: auto;
+  padding: 12px 25px 45px;
+  display: grid;
+  grid-template-columns: clamp(292px, 26vw, 368px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.panel {
+  border: 1px solid var(--line);
+  background: linear-gradient(155deg, rgba(8, 25, 17, .95), rgba(3, 12, 8, .96));
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+  backdrop-filter: blur(7px);
+}
+.leftcol, .rightcol { display: grid; gap: 15px; min-width: 0; }
+.leftcol .panel { padding: 15px 16px; }
+.section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 13px; }
+.section-title h2 { margin: 0; font-size: 1.13rem; letter-spacing: -.02em; }
+.rightcol .section-title h2 { font-size: 1.27rem; }
+.step { font-weight: 800; color: #00230f; background: var(--accent); border-radius: 7px; padding: 3px 8px; font-size: .73rem; }
+.drop {
+  border: 1.5px dashed rgba(88,255,162,.5);
+  border-radius: 11px;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 13px 12px;
+  background: rgba(4, 20, 12, .82);
+  transition: .2s;
+  cursor: pointer;
+}
+.drop.drag { border-color: #c1ffd9; background: #123922; transform: scale(1.01); }
+.drop svg { width: 29px; height: 29px; margin-bottom: 6px; stroke: var(--accent); }
+.drop strong { font-size: .89rem; }
+.drop small { color: var(--muted); max-width: 300px; margin-top: 5px; font-size: .71rem; }
+.choose { margin-top: 9px; display: inline-block; border-radius: 7px; background: #123a23; border: 1px solid #2a7a4b; padding: 7px 11px; font-size: .76rem; font-weight: 750; color: #c7ffd9; }
+.file-info { display: none; justify-content: space-between; gap: 8px; align-items: center; margin-top: 10px; background: #0b2819; border: 1px solid var(--line); border-radius: 9px; padding: 8px; }
+.file-info.show { display: flex; }
+.file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; font-size: .84rem; }
+.sub { font-size: .74rem; color: var(--muted); }
+.control { padding: 10px 0; border-top: 1px solid var(--line); }
+.control:first-of-type { border-top: 0; }
+.control-head { display: flex; justify-content: space-between; gap: 9px; align-items: center; margin-bottom: 6px; }
+.control-head label { font-weight: 650; font-size: .82rem; }
+.control-head output { font-size: .8rem; color: var(--accent); font-weight: 700; white-space: nowrap; }
+.hint { font-size: .75rem; color: var(--muted); margin: 3px 0 0; }
+.check { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 17px; height: 17px; flex: none; margin-top: 3px; }
+.check strong { font-size: .84rem; }
+.check small { display: block; color: var(--muted); font-size: .72rem; margin-top: 3px; line-height: 1.38; }
+input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+select { border: 1px solid rgba(71, 255, 148, .38); background: #081c11; color: var(--text); border-radius: 7px; padding: 7px; width: 100%; margin-top: 5px; font-size: .79rem; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pill { background: #123922; color: #b8ffce; border: 1px solid rgba(69,255,145,.45); padding: 3px 8px; border-radius: 99px; font-size: .73rem; }
+.btn { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(69,255,145,.4); background: #102b1b; color: var(--text); font-weight: 800; display: flex; gap: 8px; align-items: center; justify-content: center; }
+.btn.primary { background: var(--accent); color: #002713; border: 0; box-shadow: 0 0 22px rgba(39,255,108,.12); }
+.btn.primary:hover:not(:disabled) { background: #8affb7; }
+.btn.ghost { background: #0b2517; }
+.btn.ghost[hidden], .results[hidden], .hide[hidden], .progress-box[hidden] { display: none; }
+.actionbox { display: grid; gap: 9px; }
+.status { font-size: .78rem; color: var(--muted); min-height: 1.5em; margin: 0; }
+.status.error { color: var(--bad); }
+.status.good { color: var(--accent); }
+.progress-track { height: 7px; border-radius: 10px; background: #163d25; overflow: hidden; margin-top: 8px; }
+.progressbar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.progress-label { font-size: .8rem; color: var(--muted); }
+.viewer {
+  width: 100%;
+  height: clamp(480px, 63vh, 760px);
+  display: block;
+  background: radial-gradient(ellipse at 50% 50%, #113b23 0%, #07170e 60%, #020905 100%);
+  border: 1px solid rgba(85,255,160,.35);
+  border-radius: 13px;
+  --poster-color: transparent;
+}
+.switches { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 12px; }
+.switches button { border: 1px solid var(--line); border-radius: 9px; background: #091d11; color: var(--muted); padding: 11px; font-weight: 750; }
+.switches button.active { border-color: #63ffa4; background: #17462a; color: #e6ffed; }
+.preview-empty { font-size: .82rem; color: var(--muted); margin: 12px 0 0; }
+.rightcol #results { padding: 23px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.metric { background: rgba(6, 30, 15, .93); border: 1px solid var(--line); border-radius: 11px; padding: 17px 16px; }
+.metric span { display: block; font-size: .77rem; color: var(--muted); }
+.metric strong { display: block; font-size: clamp(1.25rem, 1.75vw, 1.8rem); margin-top: 7px; color: #f1fff4; overflow-wrap: anywhere; }
+.savings { text-align: center; background: linear-gradient(90deg,#0c331d,#13512a); border-radius: 12px; border: 1px solid rgba(75,255,135,.36); padding: 19px; margin: 14px 0 0; }
+.savings strong { display: block; font-size: 2.5rem; color: var(--strong); }
+.savings span { color: #c4e7d3; font-size: .86rem; }
+.savings.worse { background: #3e2a21; border-color: #805f3c; }
+.savings.worse strong { color: #ffcf81; }
+.log { font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: .7rem; white-space: pre-wrap; color: #b5ddca; background: #06170d; border: 1px solid var(--line); border-radius: 9px; padding: 10px; max-height: 126px; overflow: auto; margin-top: 8px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.site-footer {
+  max-width: 1640px;
+  margin: 0 auto;
+  padding: 11px 25px 30px;
+  color: #a3bfb0;
+  font-size: .79rem;
+  text-align: center;
+  letter-spacing: .025em;
+  border-top: 1px solid rgba(65,255,142,.19);
+}
+@media(max-width: 950px) {
+  .shell { grid-template-columns: minmax(260px, 34%) minmax(0, 1fr); gap: 14px; padding: 12px 14px 35px; }
+  header { padding-left: 14px; padding-right: 14px; }
+  .viewer { height: clamp(400px, 56vh, 570px); }
+  .stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .metric { padding: 12px; }
+  .site-footer { margin: 0 14px; }
+}
+@media(max-width: 700px) {
+  .shell { grid-template-columns: 1fr; }
+  .rightcol { grid-row: 2; }
+  .viewer { height: clamp(330px, 52vh, 510px); }
+  .stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .leftcol .drop { min-height: 130px; }
+}
+@media(max-width: 480px) {
+  header { padding-top: 19px; }
+  .shell { padding: 10px 11px 29px; }
+  .panel, .rightcol #results { padding: 15px; }
+  .grid2 { grid-template-columns: 1fr; }
+  .metric strong { font-size: 1.26rem; }
+  .stats { gap: 8px; }
+  .site-footer { padding: 12px 9px 27px; }
+}
+@media(prefers-reduced-motion: reduce) {
+  .drop, .progressbar { transition: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Mesh decimate</h1>
+</header>
+<main class="shell">
+  <div class="leftcol">
+    <section class="panel" aria-labelledby="upload-title">
+      <div class="section-title"><h2 id="upload-title">Cargar modelo GLB</h2><span class="step">01</span></div>
+      <div id="drop" class="drop" role="button" tabindex="0" aria-label="Elegir archivo GLB o arrastrarlo aquí">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m0 0L7 8m5-5l5 5M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+        <strong>Arrastra aquí tu archivo .glb</strong>
+        <small>O elige un archivo desde tu dispositivo. Los datos se procesan localmente en este navegador.</small>
+        <span class="choose">Seleccionar modelo</span>
+      </div>
+      <input id="file" type="file" accept=".glb,model/gltf-binary" class="sr-only" />
+      <div id="fileInfo" class="file-info"><div style="min-width:0"><div id="fileName" class="file-name"></div><div id="fileSize" class="sub"></div></div><button class="btn ghost" style="width:auto;padding:8px 11px" id="clearFile" type="button">Cambiar</button></div>
+    </section>
+    <section class="panel" aria-labelledby="settings-title">
+      <div class="section-title"><h2 id="settings-title">Opciones de optimización</h2><span class="step">02</span></div>
+      <div class="control" style="border-top:0">
+        <label class="check"><input type="checkbox" id="tex" checked><span><strong>Convertir texturas a WebP</strong><small>Usa el codificador WebP de tu navegador. Conserva las texturas normales sin modificación para evitar artefactos.</small></span></label>
+        <div id="texControls" style="padding:14px 0 0 30px">
+          <div class="control-head"><label for="quality">Calidad WebP</label><output id="qualityValue">80%</output></div><input id="quality" type="range" min="30" max="100" step="5" value="80">
+          <label style="font-size:.8rem;font-weight:650" for="resolution">Resolución máxima de texturas</label>
+          <select id="resolution"><option value="0">Mantener resolución original</option><option value="4096">Máximo 4096 px</option><option value="2048" selected>Máximo 2048 px</option><option value="1024">Máximo 1024 px</option><option value="512">Máximo 512 px</option></select>
+        </div>
+      </div>
+      <div class="control"><label class="check"><input type="checkbox" id="clean" checked><span><strong>Limpiar geometría (Weld + Dedup)</strong><small>Fusiona vértices idénticos y elimina datos repetidos; no intenta reconstruir una topología deteriorada.</small></span></label></div>
+      <div class="control"><label class="check"><input type="checkbox" id="simplify" checked><span><strong>Reducir polígonos</strong><small>Operación con pérdida. Comprueba visualmente que se conserve la forma de la pieza.</small></span></label>
+        <div id="simplifyControls" style="padding:13px 0 0 30px"><div class="control-head"><label for="ratio">Mantener triángulos</label><output id="ratioValue">70%</output></div><input id="ratio" type="range" min="20" max="100" step="5" value="70"><p class="hint">Si el error geométrico supera el umbral, puede conservar más triángulos de los solicitados.</p></div>
+      </div>
+      <div class="control"><label class="check"><input type="checkbox" id="meshopt" checked><span><strong>Compresión Meshopt</strong><small>Genera EXT_meshopt_compression. El visualizador de destino debe tener un decodificador compatible.</small></span></label></div>
+    </section>
+    <section class="panel actionbox" aria-labelledby="action-title">
+      <div class="section-title" style="margin-bottom:0"><h2 id="action-title">Generar archivo optimizado</h2><span class="step">03</span></div>
+      <button id="run" class="btn primary" type="button" disabled>◈ Optimizar modelo</button>
+      <div id="progress" class="progress-box" hidden><div class="progress-label" id="progressLabel">Preparando...</div><div class="progress-track"><div class="progressbar" id="progressBar"></div></div></div>
+      <p id="status" class="status" role="status" aria-live="polite">Selecciona un GLB para comenzar.</p>
+      <button id="download" class="btn ghost" type="button" hidden>↓ Descargar GLB optimizado</button>
+      <details><summary style="color:var(--muted);font-size:.8rem;cursor:pointer">Registro técnico</summary><div id="log" class="log" aria-live="polite">Sin actividad.</div></details>
+    </section>
+  </div>
+  <div class="rightcol">
+    <section class="panel" aria-labelledby="preview-title"><div class="section-title"><h2 id="preview-title">Vista previa 3D</h2><span class="pill">Interactiva</span></div>
+      <div class="switches"><button id="showOriginal" class="active" type="button" disabled>Original</button><button id="showOptimized" type="button" disabled>Optimizado</button></div>
+      <model-viewer id="viewer" class="viewer" alt="Vista previa del modelo 3D" camera-controls auto-rotate shadow-intensity="1" exposure="1" touch-action="pan-y"></model-viewer>
+      <p id="viewerHint" class="preview-empty">Carga un GLB para previsualizarlo y girarlo con el ratón o el dedo.</p>
+    </section>
+    <section id="results" class="panel results" hidden aria-labelledby="result-title"><div class="section-title"><h2 id="result-title">Comparación de resultados</h2><span class="step">04</span></div><div class="stats"><div class="metric"><span>Tamaño original</span><strong id="originalBytes">—</strong></div><div class="metric"><span>Tamaño optimizado</span><strong id="optimizedBytes">—</strong></div><div class="metric"><span>Triángulos antes</span><strong id="originalTris">—</strong></div><div class="metric"><span>Triángulos después</span><strong id="optimizedTris">—</strong></div><div class="metric"><span>Texturas procesadas</span><strong id="convertedTextures">—</strong></div><div class="metric"><span>Tiempo total</span><strong id="runtime">—</strong></div></div><div class="savings" id="savingsBox"><strong id="percent">—</strong><span id="savingsNote">reducción de tamaño</span></div></section>
+    <section class="panel"><div class="section-title"><h2>Consejos para tus modelos</h2></div><p class="hint" style="margin:0 0 11px">Para esculturas patrimoniales, empieza con 70–85% de triángulos y WebP a 80–90%. Inspecciona inscripciones, rostros y bordes después de reducir geometría.</p><p class="hint">Para platillos WebAR puedes probar 50–70% y texturas de 1024–2048 px. Es posible que Meshopt aumente algunos archivos por sí solo: compara siempre el tamaño final.</p><p class="hint"><strong>Compatibilidad:</strong> si activas WebP y Meshopt, el visor debe admitir las extensiones <code>EXT_texture_webp</code> y <code>EXT_meshopt_compression</code>.</p></section>
+  </div>
+</main>
+<footer class="site-footer">Mesh decimate · Herramienta gratuita y sin fines de lucro.</footer>
+<script type="module">
+import { WebIO, Document } from '@gltf-transform/core';
+import { ALL_EXTENSIONS, EXTTextureWebP } from '@gltf-transform/extensions';
+import { weld, dedup, simplify, meshopt, listTextureSlots } from '@gltf-transform/functions';
+import { MeshoptEncoder, MeshoptDecoder, MeshoptSimplifier } from 'meshoptimizer';
+
+const $ = (id) => document.getElementById(id);
+const dom={drop:$('drop'),file:$('file'),fileInfo:$('fileInfo'),fileName:$('fileName'),fileSize:$('fileSize'),clearFile:$('clearFile'),run:$('run'),download:$('download'),status:$('status'),log:$('log'),viewer:$('viewer'),viewerHint:$('viewerHint'),showOriginal:$('showOriginal'),showOptimized:$('showOptimized'),results:$('results'),progress:$('progress'),progressLabel:$('progressLabel'),progressBar:$('progressBar'),originalBytes:$('originalBytes'),optimizedBytes:$('optimizedBytes'),originalTris:$('originalTris'),optimizedTris:$('optimizedTris'),convertedTextures:$('convertedTextures'),runtime:$('runtime'),percent:$('percent'),savingsBox:$('savingsBox'),savingsNote:$('savingsNote')};
+let selectedFile=null,outputBlob=null,origUrl=null,optimUrl=null,busy=false,libraryReady=false,converted=0;
+const prettyBytes=(n)=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:`${(n/1048576).toFixed(2)} MB`;
+const fmtNumber=(n)=>new Intl.NumberFormat('es-MX').format(n);
+function log(message){const t=new Date().toLocaleTimeString('es-MX',{hour12:false}); if(dom.log.textContent==='Sin actividad.')dom.log.textContent=''; dom.log.textContent+=`[${t}] ${message}\n`;dom.log.scrollTop=dom.log.scrollHeight;}
+function status(message,type=''){dom.status.textContent=message;dom.status.className='status '+type;}
+function progress(p,message){dom.progress.hidden=false;dom.progressBar.style.width=`${p}%`;dom.progressLabel.textContent=message;status(message);}
+const tick=()=>new Promise(resolve=>setTimeout(resolve,24));
+function freeUrls(){if(origUrl){URL.revokeObjectURL(origUrl);origUrl=null}if(optimUrl){URL.revokeObjectURL(optimUrl);optimUrl=null}}
+function resetOutput(){outputBlob=null;dom.results.hidden=true;dom.download.hidden=true;dom.showOptimized.disabled=true;dom.showOptimized.classList.remove('active');dom.showOriginal.classList.add('active');dom.progress.hidden=true;}
+function display(file){if(busy)return;resetOutput();freeUrls();selectedFile=file;
+ if(!file){dom.fileInfo.classList.remove('show');dom.viewer.removeAttribute('src');dom.showOriginal.disabled=true;dom.viewerHint.textContent='Carga un GLB para previsualizarlo.';dom.run.disabled=true;status('Selecciona un GLB para comenzar.');return;}
+ if(!file.name.toLowerCase().endsWith('.glb')){selectedFile=null;status('Selecciona un archivo con extensión .glb.','error');dom.run.disabled=true;return;}
+ if(file.size<20){selectedFile=null;status('El archivo está vacío o no es un GLB válido.','error');dom.run.disabled=true;return;}
+ dom.fileName.textContent=file.name;dom.fileSize.textContent=prettyBytes(file.size);dom.fileInfo.classList.add('show');origUrl=URL.createObjectURL(file);dom.viewer.setAttribute('src',origUrl);dom.showOriginal.disabled=false;dom.viewerHint.textContent='Vista original: arrastra para girar y usa la rueda para acercar.';dom.run.disabled=!libraryReady;status(libraryReady?'Modelo listo para optimizar.':'Cargando motor de optimización...');log('Modelo seleccionado: '+file.name+' ('+prettyBytes(file.size)+')');
+ if(file.size>150*1048576)status('Modelo muy grande: el procesamiento podría agotar la memoria del navegador.','error');
+}
+dom.drop.addEventListener('click',()=>dom.file.click());dom.drop.addEventListener('keydown',(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();dom.file.click()}});
+dom.file.addEventListener('change',()=>{if(dom.file.files.length)display(dom.file.files[0])});dom.clearFile.addEventListener('click',()=>dom.file.click());
+for(const ev of ['dragenter','dragover'])dom.drop.addEventListener(ev,(e)=>{e.preventDefault();dom.drop.classList.add('drag')});
+for(const ev of ['dragleave','drop'])dom.drop.addEventListener(ev,(e)=>{e.preventDefault();dom.drop.classList.remove('drag')});
+dom.drop.addEventListener('drop',e=>{if(e.dataTransfer.files.length)display(e.dataTransfer.files[0])});
+for(const [toggle,target] of [['tex','texControls'],['simplify','simplifyControls']])$(toggle).addEventListener('change',()=>{$(target).hidden=!$(toggle).checked});
+for(const [range,out] of [['quality','qualityValue'],['ratio','ratioValue']])$(range).addEventListener('input',()=>{$(out).textContent=$(range).value+'%'});
+function showWhich(optimized){if(optimized&&!optimUrl)return;dom.viewer.setAttribute('src',optimized?optimUrl:origUrl);dom.showOriginal.classList.toggle('active',!optimized);dom.showOptimized.classList.toggle('active',optimized);dom.viewerHint.textContent=optimized?'Vista optimizada: compara los detalles antes de usar el modelo.':'Vista original: arrastra para girar y usa la rueda para acercar.';}
+dom.showOriginal.addEventListener('click',()=>showWhich(false));dom.showOptimized.addEventListener('click',()=>showWhich(true));
+function countTriangles(doc){let total=0;for(const m of doc.getRoot().listMeshes()){for(const p of m.listPrimitives()){const count=p.getIndices()?.getCount()??p.getAttribute('POSITION')?.getCount()??0;const mode=p.getMode();if(mode===4)total+=Math.floor(count/3);if(mode===5||mode===6)total+=Math.max(0,count-2)}}return total}
+async function imageToWebP(image,mime,quality,maxSize){const bmp=await createImageBitmap(new Blob([image],{type:mime}));try{const scale=maxSize?Math.min(1,maxSize/Math.max(bmp.width,bmp.height)):1;const w=Math.max(1,Math.round(bmp.width*scale)),h=Math.max(1,Math.round(bmp.height*scale));const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d',{alpha:true});if(!ctx)throw new Error('No se pudo abrir el contexto 2D del navegador.');ctx.drawImage(bmp,0,0,w,h);const b=await new Promise(resolve=>canvas.toBlob(resolve,'image/webp',quality));canvas.width=1;canvas.height=1;if(!b||b.type!=='image/webp')throw new Error('Este navegador no permite exportar texturas WebP.');return new Uint8Array(await b.arrayBuffer())}finally{bmp.close()}}
+async function webpTextures(doc,quality,maxSize){let count=0,skip=0;for(const texture of doc.getRoot().listTextures()){
+  const image=texture.getImage(),mime=texture.getMimeType();if(!image||!['image/png','image/jpeg','image/webp'].includes(mime)){skip++;continue;}
+  if(listTextureSlots(texture).some(x=>/normaltexture/i.test(x))){skip++;continue;}
+  try{
+   const bmp=await createImageBitmap(new Blob([image],{type:mime}));const origWidth=bmp.width,origHeight=bmp.height;bmp.close();
+   if(mime==='image/webp'&&(!maxSize||Math.max(origWidth,origHeight)<=maxSize)){skip++;continue;}
+   const newImage=await imageToWebP(new Uint8Array(image),mime,quality,maxSize);
+   if(newImage.byteLength<image.byteLength){texture.setImage(newImage).setMimeType('image/webp');const uri=texture.getURI();if(uri)texture.setURI(uri.replace(/\.[^.]+$/,'')+'.webp');count++;log(`Textura: ${prettyBytes(image.byteLength)} → ${prettyBytes(newImage.byteLength)}`)}else{skip++;log('Textura conservada: WebP no redujo su tamaño.');}
+  }catch(e){skip++;log('Textura omitida: '+(e?.message||e));}
+ }
+ if(doc.getRoot().listTextures().some(t=>t.getMimeType()==='image/webp'))doc.createExtension(EXTTextureWebP).setRequired(true);
+ log(`Texturas a WebP: ${count} convertidas, ${skip} conservadas.`);return count;
+}
+async function optimize(){if(!selectedFile||busy||!libraryReady)return;busy=true;dom.run.disabled=true;dom.download.hidden=true;dom.results.hidden=true;const t0=performance.now();let doc=null;let etapa="Preparando";try{
+  etapa='Preparando bibliotecas';progress(4,'Preparando motor de compresión...');await tick();await Promise.all([MeshoptDecoder.ready,MeshoptEncoder.ready,MeshoptSimplifier.ready]);
+  const io=new WebIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({'meshopt.decoder':MeshoptDecoder,'meshopt.encoder':MeshoptEncoder});
+  etapa='Leyendo archivo GLB';progress(12,'Leyendo el modelo original...');await tick();
+  const bytes=new Uint8Array(await selectedFile.arrayBuffer());
+  if(bytes.byteLength<20||new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).getUint32(0,true)!==0x46546c67)throw new Error('El archivo no tiene una cabecera GLB válida.');
+  doc=await io.readBinary(bytes);
+  if(!doc||typeof doc.getRoot!=='function')throw new Error('No se pudo construir el documento GLB.');
+  const primitive=doc.getRoot().listMeshes().flatMap(m=>m.listPrimitives())[0];
+  if(primitive && Document.fromGraph(primitive.getGraph())!==doc)throw new Error('Conflicto de módulos: glTF Transform no comparte el documento correcto. Actualiza la página sin caché (Ctrl+F5).');
+  const tBefore=countTriangles(doc);
+  log(`GLB leído correctamente. ${fmtNumber(tBefore)} triángulos, ${doc.getRoot().listTextures().length} texturas.`);
+  converted=0;
+  if($('tex').checked){etapa='Texturas WebP';progress(24,'Convirtiendo y reduciendo texturas...');await tick();converted=await webpTextures(doc,Number($('quality').value)/100,Number($('resolution').value));}
+  if($('clean').checked){etapa='Weld y Dedup';progress(45,'Uniendo vértices y eliminando duplicados...');await tick();await doc.transform(weld({}),dedup());log('Weld + Dedup terminados.');}
+  if($('simplify').checked&&Number($('ratio').value)<100){etapa='Simplify';progress(62,'Reduciendo polígonos...');await tick();await doc.transform(simplify({simplifier:MeshoptSimplifier,ratio:Number($('ratio').value)/100,error:0.01}));log('Reducción de polígonos terminada.');}
+  const tAfter=countTriangles(doc);
+  if($('meshopt').checked){etapa='Compresión Meshopt';progress(76,'Aplicando compresión Meshopt...');await tick();await doc.transform(meshopt({encoder:MeshoptEncoder,level:'high'}));log('Meshopt aplicado.');}
+  etapa='Exportación GLB';progress(87,'Escribiendo GLB optimizado...');await tick();const out=await io.writeBinary(doc);
+  if(!out||out.byteLength===0)throw new Error('La exportación no produjo un archivo GLB.');
+  outputBlob=new Blob([out],{type:'model/gltf-binary'});
+  if(optimUrl)URL.revokeObjectURL(optimUrl);optimUrl=URL.createObjectURL(outputBlob);
+  dom.originalBytes.textContent=prettyBytes(selectedFile.size);dom.optimizedBytes.textContent=prettyBytes(out.byteLength);
+  dom.originalTris.textContent=fmtNumber(tBefore);dom.optimizedTris.textContent=fmtNumber(tAfter);
+  dom.convertedTextures.textContent=fmtNumber(converted);dom.runtime.textContent=((performance.now()-t0)/1000).toFixed(1)+' s';
+  const diff=100*(1-out.byteLength/selectedFile.size);dom.percent.textContent=(diff>0?'−':diff<0?'+':'')+Math.abs(diff).toFixed(1)+'%';dom.savingsBox.classList.toggle('worse',diff<0);dom.savingsNote.textContent=diff>=0?'reducción de peso':'el archivo final es más pesado que el original';
+  dom.results.hidden=false;dom.download.hidden=false;dom.showOptimized.disabled=false;dom.showOriginal.disabled=false;showWhich(true);progress(100,'¡Archivo optimizado! Compara el resultado y descárgalo.');status('Optimización terminada. Revisa que el modelo conserve sus detalles.','good');log(`Archivo final: ${prettyBytes(out.byteLength)} (${diff.toFixed(1)}% ahorro).`);
+ }catch(e){const msg=e?.message||String(e);status('No se pudo optimizar ('+etapa+'): '+msg,'error');log('ERROR en '+etapa+': '+msg);if(e?.stack)log('Detalle técnico: '+e.stack.split('\n').slice(0,5).join(' | '));
+ if(/getRoot/.test(msg))log('POSIBLE CAUSA: el navegador conserva una versión anterior de los módulos de glTF Transform. Publica la v2.1 y pulsa Ctrl+F5.');
+ if(/draco|basis|ktx2|dependency/i.test(msg))log('Recomendación: exporta previamente a un GLB estándar con texturas PNG/JPEG en Blender.');dom.progress.hidden=true;
+ }finally{busy=false;dom.run.disabled=!selectedFile||!libraryReady;}}
+dom.run.addEventListener('click',optimize);
+dom.download.addEventListener('click',()=>{if(!outputBlob)return;const a=document.createElement('a');const name=selectedFile.name.replace(/\.glb$/i,'');const url=URL.createObjectURL(outputBlob);a.href=url;a.download=name+'_webAR_optimizado.glb';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);});
+window.addEventListener('beforeunload',freeUrls);
+(async()=>{try{await Promise.all([MeshoptEncoder.ready,MeshoptDecoder.ready,MeshoptSimplifier.ready]);libraryReady=true;dom.run.disabled=!selectedFile;status(selectedFile?'Modelo listo para optimizar.':'Motor listo. Selecciona un archivo GLB.','good');log('Bibliotecas de optimización inicializadas.')}catch(e){status('No se cargó el motor. Comprueba tu conexión a Internet y actualiza la página.','error');log('Error de dependencias: '+e)}})();
+</script>
+</body>
+</html>
